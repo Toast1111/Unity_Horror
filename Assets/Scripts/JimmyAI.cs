@@ -7,27 +7,39 @@ public class JimmyAI : MonoBehaviour
     [Header("References")]
     public Transform player;
     
+    [Header("Animation (Optional)")]
+    [Tooltip("Animation component for legacy animation system (optional)")]
+    public Animation animationComponent;
+    
+    [Tooltip("Animator component for mecanim animation system (optional)")]
+    public Animator animatorComponent;
+    
     [Header("AI States")]
     public enum AIState
     {
         Patrolling,
         Investigating,
         Chasing,
-        Searching
+        Searching,
+        Distracted,
+        Hiding
     }
     
     public AIState currentState = AIState.Patrolling;
     
     [Header("Detection Settings")]
-    public float detectionRange = 15f;
-    public float fieldOfView = 120f;
+    public float detectionRange = 20f;
+    public float fieldOfView = 90f;
     public LayerMask obstacleMask;
     public float memoryDuration = 5f;
+    public LayerMask targetLayers;
     
     [Header("Movement Settings")]
     public float patrolSpeed = 3f;
     public float chaseSpeed = 6f;
     public float investigateSpeed = 4f;
+    public float walkSpeed = 3.5f;
+    public float runSpeed = 6f;
     
     [Header("Patrol Settings")]
     public List<Transform> patrolPoints = new List<Transform>();
@@ -47,6 +59,11 @@ public class JimmyAI : MonoBehaviour
     private float investigationTimer = 0f;
     private List<Vector3> hotZones = new List<Vector3>();
     private PlayerController playerController;
+    private float boredomTimer = 0f;
+    private float lastSeenTimer = 0f;
+    private bool goToLastSeen = false;
+    private HidingSpot currentHidingSpot = null;
+    private bool isPlayingHidingAnimation = false;
     
     void Start()
     {
@@ -95,6 +112,12 @@ public class JimmyAI : MonoBehaviour
             case AIState.Searching:
                 SearchForPlayer();
                 break;
+            case AIState.Distracted:
+                Distracted();
+                break;
+            case AIState.Hiding:
+                HideAndPeek();
+                break;
         }
     }
     
@@ -122,12 +145,31 @@ public class JimmyAI : MonoBehaviour
         }
         
         // Check for direct line of sight to player
-        if (CanSeePlayer())
+        bool canSeePlayer = CanSeePlayer();
+        
+        if (canSeePlayer)
         {
             currentState = AIState.Chasing;
             lastKnownPlayerPosition = player.position;
             playerMemoryTimer = memoryDuration;
+            lastSeenTimer = 0f;
             return;
+        }
+        
+        // Enhanced detection: hear nearby movement even without direct sight
+        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
+        bool isPlayerMovingFast = playerController != null && !playerController.IsHiding();
+        
+        // If player is close and moving, can hear them
+        if (isPlayerMovingFast && distanceToPlayer < 5f)
+        {
+            // Player is very close and not hiding
+            if (currentState != AIState.Chasing && currentState != AIState.Distracted)
+            {
+                currentState = AIState.Investigating;
+                investigationPoint = player.position;
+                investigationTimer = investigationTime;
+            }
         }
         
         // Update memory timer
@@ -139,10 +181,17 @@ public class JimmyAI : MonoBehaviour
             {
                 if (currentState == AIState.Chasing)
                 {
-                    currentState = AIState.Searching;
-                    investigationTimer = investigationTime;
+                    currentState = AIState.Distracted;
+                    goToLastSeen = true;
                 }
             }
+        }
+        
+        // If in chase but lost player, transition to distracted
+        if (currentState == AIState.Chasing && !canSeePlayer)
+        {
+            currentState = AIState.Distracted;
+            goToLastSeen = true;
         }
     }
     
@@ -150,8 +199,11 @@ public class JimmyAI : MonoBehaviour
     {
         if (player == null) return false;
         
-        Vector3 directionToPlayer = (player.position - transform.position).normalized;
-        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
+        Vector3 playerHeadPosition = player.position + Vector3.up * 1.5f; // Approximate head height
+        Vector3 eyePosition = transform.position + Vector3.up * 1.5f; // Jimmy's eye height
+        
+        Vector3 directionToPlayer = (playerHeadPosition - eyePosition).normalized;
+        float distanceToPlayer = Vector3.Distance(eyePosition, playerHeadPosition);
         
         // Check if player is in range
         if (distanceToPlayer > detectionRange)
@@ -162,11 +214,14 @@ public class JimmyAI : MonoBehaviour
         if (angleToPlayer > fieldOfView / 2f)
             return false;
         
-        // Check if there's a clear line of sight
+        // Check if there's a clear line of sight using both target layers and obstacle mask
         RaycastHit hit;
-        if (Physics.Raycast(transform.position + Vector3.up, directionToPlayer, out hit, distanceToPlayer, obstacleMask))
+        LayerMask combinedMask = targetLayers.value != 0 ? targetLayers : obstacleMask;
+        
+        if (Physics.Linecast(eyePosition, playerHeadPosition, out hit, combinedMask))
         {
-            if (hit.transform != player)
+            // Check if the hit object is the player
+            if (hit.transform != player && !hit.transform.IsChildOf(player))
                 return false;
         }
         
@@ -178,6 +233,18 @@ public class JimmyAI : MonoBehaviour
         navAgent.speed = patrolSpeed;
         
         if (patrolPoints.Count == 0) return;
+        
+        // Increment timers
+        lastSeenTimer += Time.deltaTime;
+        
+        // Boredom timer - periodically check player's location (like YandereScript)
+        if (lastSeenTimer > 60f)
+        {
+            lastKnownPlayerPosition = player.position;
+            currentState = AIState.Distracted;
+            lastSeenTimer = 0f;
+            return;
+        }
         
         // Check if reached waypoint
         if (!navAgent.pathPending && navAgent.remainingDistance <= navAgent.stoppingDistance)
@@ -239,12 +306,79 @@ public class JimmyAI : MonoBehaviour
     
     void ChasePlayer()
     {
-        navAgent.speed = chaseSpeed;
+        if (player == null) return;
         
-        if (player != null)
+        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
+        
+        // Close range - full speed chase (0-4 units)
+        if (distanceToPlayer <= 4f)
         {
+            navAgent.speed = runSpeed;
             navAgent.SetDestination(player.position);
             lastKnownPlayerPosition = player.position;
+            boredomTimer = 0f;
+            
+            // Clear hiding spot if too close
+            if (currentHidingSpot != null)
+            {
+                currentHidingSpot = null;
+            }
+        }
+        // Medium range - walk/run based on boredom (4-5 units)
+        else if (distanceToPlayer <= 5f)
+        {
+            navAgent.speed = walkSpeed;
+            navAgent.SetDestination(player.position);
+            lastKnownPlayerPosition = player.position;
+            boredomTimer = 0f;
+            
+            // Clear hiding spot if too close
+            if (currentHidingSpot != null)
+            {
+                currentHidingSpot = null;
+            }
+        }
+        // Medium-far range - search behavior with hiding spot option (5-20 units)
+        else if (distanceToPlayer <= 20f)
+        {
+            // If we don't have a hiding spot and can see player, try to find one
+            if (currentHidingSpot == null && CanSeePlayer())
+            {
+                HidingSpot closest = HidingSpot.GetClosest(player.position, 5f, true);
+                if (closest != null && closest.distanceToJimmy <= 5f)
+                {
+                    // Found a good hiding spot, transition to Hiding state
+                    currentHidingSpot = closest;
+                    currentState = AIState.Hiding;
+                    return;
+                }
+            }
+            
+            // No hiding spot found or not visible, continue normal chase
+            navAgent.speed = walkSpeed;
+            navAgent.SetDestination(player.position);
+            lastKnownPlayerPosition = player.position;
+            boredomTimer += Time.deltaTime;
+            
+            // If bored and player still far, speed up
+            if (boredomTimer >= 15f && distanceToPlayer <= 20f)
+            {
+                navAgent.speed = runSpeed;
+            }
+        }
+        // Far range - run to last known position (20+ units)
+        else
+        {
+            navAgent.speed = runSpeed;
+            navAgent.SetDestination(player.position);
+            lastKnownPlayerPosition = player.position;
+            boredomTimer = 0f;
+            
+            // Clear hiding spot if too far
+            if (currentHidingSpot != null)
+            {
+                currentHidingSpot = null;
+            }
         }
     }
     
@@ -285,6 +419,178 @@ public class JimmyAI : MonoBehaviour
         }
     }
     
+    void Distracted()
+    {
+        navAgent.speed = runSpeed;
+        
+        // Move to last known player position
+        if (Vector3.Distance(transform.position, lastKnownPlayerPosition) > 4f || 
+            (goToLastSeen && Vector3.Distance(transform.position, lastKnownPlayerPosition) > 1f))
+        {
+            if (navAgent.destination != lastKnownPlayerPosition)
+            {
+                navAgent.SetDestination(lastKnownPlayerPosition);
+            }
+        }
+        else
+        {
+            // Reached last known position, wait and look around
+            investigationTimer += Time.deltaTime;
+            
+            // Wait at the position for a while before returning to patrol
+            if (investigationTimer >= investigationTime * (goToLastSeen ? 3f : 1f))
+            {
+                currentState = AIState.Patrolling;
+                goToLastSeen = false;
+                investigationTimer = 0f;
+            }
+        }
+        
+        boredomTimer = 0f;
+    }
+    
+    void HideAndPeek()
+    {
+        if (currentHidingSpot == null || player == null)
+        {
+            // No hiding spot, return to chase
+            isPlayingHidingAnimation = false;
+            currentState = AIState.Chasing;
+            return;
+        }
+        
+        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
+        float distanceToSpot = Vector3.Distance(transform.position, currentHidingSpot.transform.position);
+        
+        // Check if we should abandon the hiding spot
+        if (distanceToPlayer < 5f)
+        {
+            // Player too close, chase them directly
+            StopHidingAnimation();
+            currentHidingSpot = null;
+            currentState = AIState.Chasing;
+            return;
+        }
+        
+        if (distanceToPlayer > 25f)
+        {
+            // Player too far, abandon hiding spot
+            StopHidingAnimation();
+            currentHidingSpot = null;
+            currentState = AIState.Chasing;
+            return;
+        }
+        
+        // Check if player is hiding
+        if (playerController != null && playerController.IsHiding())
+        {
+            // Player is hiding, abandon hiding spot and search
+            StopHidingAnimation();
+            currentHidingSpot = null;
+            currentState = AIState.Searching;
+            investigationTimer = investigationTime;
+            return;
+        }
+        
+        // Move to hiding spot if not there yet
+        if (distanceToSpot > 1f)
+        {
+            navAgent.speed = runSpeed;
+            navAgent.SetDestination(currentHidingSpot.transform.position);
+            boredomTimer = 0f;
+            isPlayingHidingAnimation = false;
+        }
+        else
+        {
+            // At hiding spot, stop and peek
+            navAgent.speed = 0f;
+            
+            // Play the hiding spot animation if available and not already playing
+            if (!isPlayingHidingAnimation)
+            {
+                PlayHidingSpotAnimation();
+                isPlayingHidingAnimation = true;
+            }
+            
+            // Look towards the player
+            Vector3 directionToPlayer = player.position - transform.position;
+            directionToPlayer.y = 0; // Keep rotation on horizontal plane
+            if (directionToPlayer.sqrMagnitude > 0.01f)
+            {
+                Quaternion targetRotation = Quaternion.LookRotation(directionToPlayer);
+                transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * 5f);
+            }
+            
+            // Lerp position to exact hiding spot position for peeking
+            transform.position = Vector3.Lerp(transform.position, currentHidingSpot.transform.position, Time.deltaTime * 5f);
+            
+            // Increment boredom timer while hiding
+            boredomTimer += Time.deltaTime;
+            
+            // After watching for a while, decide what to do
+            if (boredomTimer >= 10f)
+            {
+                // Been here too long, chase player directly
+                StopHidingAnimation();
+                currentHidingSpot = null;
+                currentState = AIState.Chasing;
+                boredomTimer = 0f;
+            }
+            else if (!CanSeePlayer())
+            {
+                // Lost sight of player, leave hiding spot
+                StopHidingAnimation();
+                currentHidingSpot = null;
+                currentState = AIState.Distracted;
+                goToLastSeen = true;
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Play the animation assigned to the current hiding spot
+    /// </summary>
+    void PlayHidingSpotAnimation()
+    {
+        if (currentHidingSpot == null)
+            return;
+        
+        // Try to play animation with the legacy Animation component
+        if (animationComponent != null && currentHidingSpot.peekAnimation != null)
+        {
+            animationComponent.clip = currentHidingSpot.peekAnimation;
+            animationComponent.Play();
+            Debug.Log($"Playing hiding spot animation: {currentHidingSpot.peekAnimation.name}");
+        }
+        // Try to play animation with the Animator component (Mecanim)
+        else if (animatorComponent != null && !string.IsNullOrEmpty(currentHidingSpot.animationName))
+        {
+            // Try as trigger first
+            animatorComponent.SetTrigger(currentHidingSpot.animationName);
+            Debug.Log($"Playing hiding spot animation trigger: {currentHidingSpot.animationName}");
+            
+            // Also try to play directly if it's a state name
+            animatorComponent.Play(currentHidingSpot.animationName);
+        }
+    }
+    
+    /// <summary>
+    /// Stop the current hiding spot animation
+    /// </summary>
+    void StopHidingAnimation()
+    {
+        isPlayingHidingAnimation = false;
+        
+        // Stop legacy animation if playing
+        if (animationComponent != null && animationComponent.isPlaying)
+        {
+            animationComponent.Stop();
+        }
+        
+        // Note: Animator component transitions are handled by the animator controller
+        // so we don't need to explicitly stop them here
+    }
+    
     public void HearNoise(Vector3 noisePosition)
     {
         // Add to hot zones for dynamic patrolling
@@ -293,9 +599,9 @@ public class JimmyAI : MonoBehaviour
         // If not chasing, investigate the noise
         if (currentState != AIState.Chasing)
         {
-            currentState = AIState.Investigating;
-            investigationPoint = noisePosition;
-            investigationTimer = investigationTime;
+            currentState = AIState.Distracted;
+            lastKnownPlayerPosition = noisePosition;
+            investigationTimer = 0f;
             navAgent.SetDestination(noisePosition);
             Debug.Log("Jimmy heard a noise!");
         }
@@ -309,9 +615,9 @@ public class JimmyAI : MonoBehaviour
         // Investigate door opening
         if (currentState == AIState.Patrolling)
         {
-            currentState = AIState.Investigating;
-            investigationPoint = doorPosition;
-            investigationTimer = investigationTime;
+            currentState = AIState.Distracted;
+            lastKnownPlayerPosition = doorPosition;
+            investigationTimer = 0f;
             navAgent.SetDestination(doorPosition);
             Debug.Log("Jimmy noticed a door opened!");
         }

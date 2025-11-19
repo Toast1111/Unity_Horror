@@ -150,22 +150,30 @@ Player GameObject.SetActive(true)
           ┌────┤   PATROLLING   ├────┐
           │    └────────────────┘    │
           │            │              │
-  Hears   │            │              │ No activity
-  noise   │            │ Sees player  │ for duration
-          │            ▼              │
+  Hears   │            │              │ 60s timer
+  noise   │            │ Sees player  │ expires
+  or door │            ▼              │
           │    ┌────────────────┐    │
-          └───►│   CHASING      │    │
-               └────────┬───────┘    │
-                        │             │
-          Lost sight    │             │
-          of player     │             │
-                        ▼             │
-               ┌────────────────┐    │
-         ┌────►│   SEARCHING    ├────┘
-         │     └────────────────┘
+          └───►│   CHASING      │◄───┤
+               └─────┬──┬───────┘    │
+                     │  │             │
+       Lost sight    │  │ Spot nearby │
+       of player     │  │ (5-20 units)│
+                     │  ▼             │
+                     │ ┌────────────┐ │
+                     │ │   HIDING   │ │
+                     │ └─────┬──────┘ │
+                     │       │         │
+                     │  Bored/Close/   │
+                     │  Far/Invisible  │
+                     │       └────────►│
+                     ▼                 │
+               ┌────────────────┐     │
+         ┌────►│  DISTRACTED    ├─────┘
+         │     └────────┬───────┘
          │              │
-  Door   │              │ Timeout
-  opened │              │
+  Door   │              │ Timer expires
+  opened │              │ at location
          │              ▼
          │     ┌────────────────┐
          └─────┤ INVESTIGATING  │
@@ -174,6 +182,14 @@ Player GameObject.SetActive(true)
           Timeout       │
                         │
                         └─────► Back to PATROLLING
+                        
+               ┌────────────────┐
+               │   SEARCHING    │◄─── Player hides
+               └────────────────┘     during chase
+                        │
+                        │ Timer expires
+                        ▼
+                  Back to PATROLLING
 ```
 
 ## Class Hierarchy
