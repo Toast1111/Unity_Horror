@@ -39,12 +39,14 @@ public class PlayerController : MonoBehaviour
         if (isHiding)
         {
             HandleHidingInput();
+            UpdateHidingUI();
             return;
         }
         
         HandleMovement();
         HandleInteraction();
         HandleCrouch();
+        UpdateInteractionUI();
     }
     
     void HandleMovement()
@@ -128,6 +130,82 @@ public class PlayerController : MonoBehaviour
         }
     }
     
+    void UpdateHidingUI()
+    {
+        if (InteractionUI.Instance != null)
+        {
+            InteractionUI.Instance.ShowExitLockerPrompt();
+        }
+    }
+    
+    void UpdateInteractionUI()
+    {
+        if (InteractionUI.Instance == null)
+        {
+            return;
+        }
+        
+        bool foundInteractable = false;
+        Collider[] hitColliders = Physics.OverlapSphere(transform.position, interactionRange);
+        
+        foreach (Collider hitCollider in hitColliders)
+        {
+            // Check for door
+            Door door = hitCollider.GetComponent<Door>();
+            if (door != null)
+            {
+                if (door.IsLocked())
+                {
+                    Key requiredKey = FindKeyForDoor(door);
+                    if (requiredKey != null)
+                    {
+                        InteractionUI.Instance.ShowUnlockDoorPrompt();
+                    }
+                    else
+                    {
+                        InteractionUI.Instance.ShowLockedDoorPrompt();
+                    }
+                }
+                else
+                {
+                    if (door.IsOpen())
+                    {
+                        InteractionUI.Instance.ShowCloseDoorPrompt();
+                    }
+                    else
+                    {
+                        InteractionUI.Instance.ShowOpenDoorPrompt();
+                    }
+                }
+                foundInteractable = true;
+                break;
+            }
+            
+            // Check for key
+            Key key = hitCollider.GetComponent<Key>();
+            if (key != null)
+            {
+                InteractionUI.Instance.ShowPickupKeyPrompt();
+                foundInteractable = true;
+                break;
+            }
+            
+            // Check for locker
+            Locker locker = hitCollider.GetComponent<Locker>();
+            if (locker != null && !locker.IsOccupied())
+            {
+                InteractionUI.Instance.ShowEnterLockerPrompt();
+                foundInteractable = true;
+                break;
+            }
+        }
+        
+        if (!foundInteractable)
+        {
+            InteractionUI.Instance.HidePrompt();
+        }
+    }
+    
     void TryOpenDoor(Door door)
     {
         if (door.IsLocked())
@@ -147,7 +225,8 @@ public class PlayerController : MonoBehaviour
         }
         else
         {
-            door.Open();
+            // Toggle door open/closed
+            door.Toggle();
             NoiseManager.Instance?.GenerateNoise(door.transform.position, 10f);
         }
     }

@@ -49,6 +49,10 @@ public class JimmyAI : MonoBehaviour
     
     [Header("Hiding Spot Settings")]
     [SerializeField] private float hidingSpotCheckDistance = 5f;
+    
+    [Header("Door Interaction Settings")]
+    [SerializeField] private float doorDetectionRange = 2f;
+    [SerializeField] private float doorOpenCheckInterval = 0.5f;
 
     // Components
     private NavMeshAgent navAgent;
@@ -63,6 +67,7 @@ public class JimmyAI : MonoBehaviour
     private float boredomTimer = 0f;
     private bool goToLastSeen = false;
     private HidingSpot currentHidingSpot = null;
+    private float doorCheckTimer = 0f;
 
     // Hot zones for dynamic patrol
     private List<Vector3> hotZones = new List<Vector3>();
@@ -112,6 +117,7 @@ public class JimmyAI : MonoBehaviour
 
         UpdateState();
         ExecuteState();
+        CheckAndOpenDoors();
     }
 
     private void UpdateState()
@@ -435,6 +441,48 @@ public class JimmyAI : MonoBehaviour
         else
         {
             Debug.LogWarning("JimmyAI: GameManager not found! Cannot trigger game over.");
+        }
+    }
+    
+    /// <summary>
+    /// Check for doors in front of Jimmy and open them if they're closed but unlocked
+    /// </summary>
+    private void CheckAndOpenDoors()
+    {
+        doorCheckTimer += Time.deltaTime;
+        
+        // Only check periodically to save performance
+        if (doorCheckTimer < doorOpenCheckInterval)
+        {
+            return;
+        }
+        
+        doorCheckTimer = 0f;
+        
+        // Check if there's a door blocking Jimmy's path
+        Collider[] nearbyColliders = Physics.OverlapSphere(transform.position, doorDetectionRange);
+        
+        foreach (Collider col in nearbyColliders)
+        {
+            Door door = col.GetComponent<Door>();
+            
+            if (door != null && !door.IsLocked() && !door.IsOpen())
+            {
+                // Check if door is in front of Jimmy (within forward direction)
+                Vector3 directionToDoor = door.transform.position - transform.position;
+                float angle = Vector3.Angle(transform.forward, directionToDoor);
+                
+                // If door is roughly in front of Jimmy (within 90 degrees)
+                if (angle < 90f)
+                {
+                    // Check if Jimmy is moving towards the door
+                    if (navAgent.hasPath && navAgent.remainingDistance > doorDetectionRange)
+                    {
+                        door.Open();
+                        Debug.Log($"Jimmy opened door: {door.gameObject.name}");
+                    }
+                }
+            }
         }
     }
 
