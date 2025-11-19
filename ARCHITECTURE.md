@@ -154,14 +154,22 @@ Player GameObject.SetActive(true)
   noise   │            │ Sees player  │ expires
   or door │            ▼              │
           │    ┌────────────────┐    │
-          └───►│   CHASING      │    │
-               └────────┬───────┘    │
-                        │             │
-          Lost sight    │             │
-          of player     │             │
-                        ▼             │
-               ┌────────────────┐    │
-         ┌────►│  DISTRACTED    ├────┘
+          └───►│   CHASING      │◄───┤
+               └─────┬──┬───────┘    │
+                     │  │             │
+       Lost sight    │  │ Spot nearby │
+       of player     │  │ (5-20 units)│
+                     │  ▼             │
+                     │ ┌────────────┐ │
+                     │ │   HIDING   │ │
+                     │ └─────┬──────┘ │
+                     │       │         │
+                     │  Bored/Close/   │
+                     │  Far/Invisible  │
+                     │       └────────►│
+                     ▼                 │
+               ┌────────────────┐     │
+         ┌────►│  DISTRACTED    ├─────┘
          │     └────────┬───────┘
          │              │
   Door   │              │ Timer expires
