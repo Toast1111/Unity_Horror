@@ -11,6 +11,13 @@ public class HidingSpot : MonoBehaviour
     [Tooltip("Is this hiding spot on the left or right side? Used for peek direction.")]
     public bool isLeftSide = false;
     
+    [Header("Animation Settings")]
+    [Tooltip("Animation clip to play when Jimmy uses this hiding spot (optional). Leave empty if no specific animation needed.")]
+    public AnimationClip peekAnimation;
+    
+    [Tooltip("Animation name/trigger to play when Jimmy uses this hiding spot (optional). Used with Animator component.")]
+    public string animationName = "";
+    
     [Header("Runtime Info (Read Only)")]
     [Tooltip("Distance from this spot to Jimmy AI - updated automatically")]
     public float distanceToJimmy;

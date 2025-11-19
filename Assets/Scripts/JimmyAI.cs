@@ -7,6 +7,13 @@ public class JimmyAI : MonoBehaviour
     [Header("References")]
     public Transform player;
     
+    [Header("Animation (Optional)")]
+    [Tooltip("Animation component for legacy animation system (optional)")]
+    public Animation animationComponent;
+    
+    [Tooltip("Animator component for mecanim animation system (optional)")]
+    public Animator animatorComponent;
+    
     [Header("AI States")]
     public enum AIState
     {
@@ -56,6 +63,7 @@ public class JimmyAI : MonoBehaviour
     private float lastSeenTimer = 0f;
     private bool goToLastSeen = false;
     private HidingSpot currentHidingSpot = null;
+    private bool isPlayingHidingAnimation = false;
     
     void Start()
     {
@@ -446,6 +454,7 @@ public class JimmyAI : MonoBehaviour
         if (currentHidingSpot == null || player == null)
         {
             // No hiding spot, return to chase
+            isPlayingHidingAnimation = false;
             currentState = AIState.Chasing;
             return;
         }
@@ -457,6 +466,7 @@ public class JimmyAI : MonoBehaviour
         if (distanceToPlayer < 5f)
         {
             // Player too close, chase them directly
+            StopHidingAnimation();
             currentHidingSpot = null;
             currentState = AIState.Chasing;
             return;
@@ -465,6 +475,7 @@ public class JimmyAI : MonoBehaviour
         if (distanceToPlayer > 25f)
         {
             // Player too far, abandon hiding spot
+            StopHidingAnimation();
             currentHidingSpot = null;
             currentState = AIState.Chasing;
             return;
@@ -474,6 +485,7 @@ public class JimmyAI : MonoBehaviour
         if (playerController != null && playerController.IsHiding())
         {
             // Player is hiding, abandon hiding spot and search
+            StopHidingAnimation();
             currentHidingSpot = null;
             currentState = AIState.Searching;
             investigationTimer = investigationTime;
@@ -486,11 +498,19 @@ public class JimmyAI : MonoBehaviour
             navAgent.speed = runSpeed;
             navAgent.SetDestination(currentHidingSpot.transform.position);
             boredomTimer = 0f;
+            isPlayingHidingAnimation = false;
         }
         else
         {
             // At hiding spot, stop and peek
             navAgent.speed = 0f;
+            
+            // Play the hiding spot animation if available and not already playing
+            if (!isPlayingHidingAnimation)
+            {
+                PlayHidingSpotAnimation();
+                isPlayingHidingAnimation = true;
+            }
             
             // Look towards the player
             Vector3 directionToPlayer = player.position - transform.position;
@@ -511,6 +531,7 @@ public class JimmyAI : MonoBehaviour
             if (boredomTimer >= 10f)
             {
                 // Been here too long, chase player directly
+                StopHidingAnimation();
                 currentHidingSpot = null;
                 currentState = AIState.Chasing;
                 boredomTimer = 0f;
@@ -518,11 +539,56 @@ public class JimmyAI : MonoBehaviour
             else if (!CanSeePlayer())
             {
                 // Lost sight of player, leave hiding spot
+                StopHidingAnimation();
                 currentHidingSpot = null;
                 currentState = AIState.Distracted;
                 goToLastSeen = true;
             }
         }
+    }
+    
+    /// <summary>
+    /// Play the animation assigned to the current hiding spot
+    /// </summary>
+    void PlayHidingSpotAnimation()
+    {
+        if (currentHidingSpot == null)
+            return;
+        
+        // Try to play animation with the legacy Animation component
+        if (animationComponent != null && currentHidingSpot.peekAnimation != null)
+        {
+            animationComponent.clip = currentHidingSpot.peekAnimation;
+            animationComponent.Play();
+            Debug.Log($"Playing hiding spot animation: {currentHidingSpot.peekAnimation.name}");
+        }
+        // Try to play animation with the Animator component (Mecanim)
+        else if (animatorComponent != null && !string.IsNullOrEmpty(currentHidingSpot.animationName))
+        {
+            // Try as trigger first
+            animatorComponent.SetTrigger(currentHidingSpot.animationName);
+            Debug.Log($"Playing hiding spot animation trigger: {currentHidingSpot.animationName}");
+            
+            // Also try to play directly if it's a state name
+            animatorComponent.Play(currentHidingSpot.animationName);
+        }
+    }
+    
+    /// <summary>
+    /// Stop the current hiding spot animation
+    /// </summary>
+    void StopHidingAnimation()
+    {
+        isPlayingHidingAnimation = false;
+        
+        // Stop legacy animation if playing
+        if (animationComponent != null && animationComponent.isPlaying)
+        {
+            animationComponent.Stop();
+        }
+        
+        // Note: Animator component transitions are handled by the animator controller
+        // so we don't need to explicitly stop them here
     }
     
     public void HearNoise(Vector3 noisePosition)
