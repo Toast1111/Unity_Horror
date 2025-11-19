@@ -1,670 +1,937 @@
+using FIMSpace.FLook;
+using TMPro;
 using UnityEngine;
 using UnityEngine.AI;
-using System.Collections.Generic;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
-public class JimmyAI : MonoBehaviour
+public class YandereScript : MonoBehaviour
 {
-    [Header("References")]
-    public Transform player;
-    
-    [Header("Animation (Optional)")]
-    [Tooltip("Animation component for legacy animation system (optional)")]
-    public Animation animationComponent;
-    
-    [Tooltip("Animator component for mecanim animation system (optional)")]
-    public Animator animatorComponent;
-    
-    [Header("AI States")]
-    public enum AIState
-    {
-        Patrolling,
-        Investigating,
-        Chasing,
-        Searching,
-        Distracted,
-        Hiding
-    }
-    
-    public AIState currentState = AIState.Patrolling;
-    
-    [Header("Detection Settings")]
-    public float detectionRange = 20f;
-    public float fieldOfView = 90f;
-    public LayerMask obstacleMask;
-    public float memoryDuration = 5f;
-    public LayerMask targetLayers;
-    
-    [Header("Movement Settings")]
-    public float patrolSpeed = 3f;
-    public float chaseSpeed = 6f;
-    public float investigateSpeed = 4f;
-    public float walkSpeed = 3.5f;
-    public float runSpeed = 6f;
-    
-    [Header("Patrol Settings")]
-    public List<Transform> patrolPoints = new List<Transform>();
-    public float waypointWaitTime = 2f;
-    public float hotZoneRadius = 10f;
-    
-    [Header("Investigation Settings")]
-    public float investigationRadius = 3f;
-    public float investigationTime = 5f;
-    
-    private NavMeshAgent navAgent;
-    private int currentPatrolIndex = 0;
-    private float waypointWaitTimer = 0f;
-    private Vector3 lastKnownPlayerPosition;
-    private float playerMemoryTimer = 0f;
-    private Vector3 investigationPoint;
-    private float investigationTimer = 0f;
-    private List<Vector3> hotZones = new List<Vector3>();
-    private PlayerController playerController;
-    private float boredomTimer = 0f;
-    private float lastSeenTimer = 0f;
-    private bool goToLastSeen = false;
-    private HidingSpot currentHidingSpot = null;
-    private bool isPlayingHidingAnimation = false;
-    
-    void Start()
-    {
-        navAgent = GetComponent<NavMeshAgent>();
-        if (navAgent == null)
-        {
-            Debug.LogError("JimmyAI requires a NavMeshAgent component!");
-            return;
-        }
-        
-        // Find player
-        GameObject playerObj = GameObject.FindGameObjectWithTag("Player");
-        if (playerObj != null)
-        {
-            player = playerObj.transform;
-            playerController = playerObj.GetComponent<PlayerController>();
-        }
-        
-        // Initialize patrol
-        if (patrolPoints.Count > 0)
-        {
-            GoToNextPatrolPoint();
-        }
-        
-        // Initialize hot zones around patrol points
-        InitializeHotZones();
-    }
-    
-    void Update()
-    {
-        if (navAgent == null || player == null) return;
-        
-        UpdateState();
-        
-        switch (currentState)
-        {
-            case AIState.Patrolling:
-                Patrol();
-                break;
-            case AIState.Investigating:
-                Investigate();
-                break;
-            case AIState.Chasing:
-                ChasePlayer();
-                break;
-            case AIState.Searching:
-                SearchForPlayer();
-                break;
-            case AIState.Distracted:
-                Distracted();
-                break;
-            case AIState.Hiding:
-                HideAndPeek();
-                break;
-        }
-    }
-    
-    void InitializeHotZones()
-    {
-        hotZones.Clear();
-        foreach (Transform point in patrolPoints)
-        {
-            hotZones.Add(point.position);
-        }
-    }
-    
-    void UpdateState()
-    {
-        // Check if player is hiding
-        if (playerController != null && playerController.IsHiding())
-        {
-            // Can't detect hidden player
-            if (currentState == AIState.Chasing)
-            {
-                currentState = AIState.Searching;
-                investigationTimer = investigationTime;
-            }
-            return;
-        }
-        
-        // Check for direct line of sight to player
-        bool canSeePlayer = CanSeePlayer();
-        
-        if (canSeePlayer)
-        {
-            currentState = AIState.Chasing;
-            lastKnownPlayerPosition = player.position;
-            playerMemoryTimer = memoryDuration;
-            lastSeenTimer = 0f;
-            return;
-        }
-        
-        // Enhanced detection: hear nearby movement even without direct sight
-        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
-        bool isPlayerMovingFast = playerController != null && !playerController.IsHiding();
-        
-        // If player is close and moving, can hear them
-        if (isPlayerMovingFast && distanceToPlayer < 5f)
-        {
-            // Player is very close and not hiding
-            if (currentState != AIState.Chasing && currentState != AIState.Distracted)
-            {
-                currentState = AIState.Investigating;
-                investigationPoint = player.position;
-                investigationTimer = investigationTime;
-            }
-        }
-        
-        // Update memory timer
-        if (playerMemoryTimer > 0)
-        {
-            playerMemoryTimer -= Time.deltaTime;
-            
-            if (playerMemoryTimer <= 0)
-            {
-                if (currentState == AIState.Chasing)
-                {
-                    currentState = AIState.Distracted;
-                    goToLastSeen = true;
-                }
-            }
-        }
-        
-        // If in chase but lost player, transition to distracted
-        if (currentState == AIState.Chasing && !canSeePlayer)
-        {
-            currentState = AIState.Distracted;
-            goToLastSeen = true;
-        }
-    }
-    
-    bool CanSeePlayer()
-    {
-        if (player == null) return false;
-        
-        Vector3 playerHeadPosition = player.position + Vector3.up * 1.5f; // Approximate head height
-        Vector3 eyePosition = transform.position + Vector3.up * 1.5f; // Jimmy's eye height
-        
-        Vector3 directionToPlayer = (playerHeadPosition - eyePosition).normalized;
-        float distanceToPlayer = Vector3.Distance(eyePosition, playerHeadPosition);
-        
-        // Check if player is in range
-        if (distanceToPlayer > detectionRange)
-            return false;
-        
-        // Check if player is in field of view
-        float angleToPlayer = Vector3.Angle(transform.forward, directionToPlayer);
-        if (angleToPlayer > fieldOfView / 2f)
-            return false;
-        
-        // Check if there's a clear line of sight using both target layers and obstacle mask
-        RaycastHit hit;
-        LayerMask combinedMask = targetLayers.value != 0 ? targetLayers : obstacleMask;
-        
-        if (Physics.Linecast(eyePosition, playerHeadPosition, out hit, combinedMask))
-        {
-            // Check if the hit object is the player
-            if (hit.transform != player && !hit.transform.IsChildOf(player))
-                return false;
-        }
-        
-        return true;
-    }
-    
-    void Patrol()
-    {
-        navAgent.speed = patrolSpeed;
-        
-        if (patrolPoints.Count == 0) return;
-        
-        // Increment timers
-        lastSeenTimer += Time.deltaTime;
-        
-        // Boredom timer - periodically check player's location (like YandereScript)
-        if (lastSeenTimer > 60f)
-        {
-            lastKnownPlayerPosition = player.position;
-            currentState = AIState.Distracted;
-            lastSeenTimer = 0f;
-            return;
-        }
-        
-        // Check if reached waypoint
-        if (!navAgent.pathPending && navAgent.remainingDistance <= navAgent.stoppingDistance)
-        {
-            waypointWaitTimer += Time.deltaTime;
-            
-            if (waypointWaitTimer >= waypointWaitTime)
-            {
-                GoToNextPatrolPoint();
-                waypointWaitTimer = 0f;
-            }
-        }
-    }
-    
-    void GoToNextPatrolPoint()
-    {
-        if (patrolPoints.Count == 0) return;
-        
-        // Choose next patrol point dynamically based on hot zones
-        currentPatrolIndex = GetNextDynamicPatrolPoint();
-        
-        if (currentPatrolIndex < patrolPoints.Count)
-        {
-            navAgent.SetDestination(patrolPoints[currentPatrolIndex].position);
-        }
-    }
-    
-    int GetNextDynamicPatrolPoint()
-    {
-        // Favor hot zones (areas with recent activity)
-        float highestPriority = -1f;
-        int bestIndex = (currentPatrolIndex + 1) % patrolPoints.Count;
-        
-        for (int i = 0; i < patrolPoints.Count; i++)
-        {
-            if (i == currentPatrolIndex) continue;
-            
-            float priority = 0f;
-            
-            // Check if this point is near a hot zone
-            foreach (Vector3 hotZone in hotZones)
-            {
-                float distance = Vector3.Distance(patrolPoints[i].position, hotZone);
-                if (distance < hotZoneRadius)
-                {
-                    priority += 1f / (distance + 1f);
-                }
-            }
-            
-            if (priority > highestPriority)
-            {
-                highestPriority = priority;
-                bestIndex = i;
-            }
-        }
-        
-        return bestIndex;
-    }
-    
-    void ChasePlayer()
-    {
-        if (player == null) return;
-        
-        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
-        
-        // Close range - full speed chase (0-4 units)
-        if (distanceToPlayer <= 4f)
-        {
-            navAgent.speed = runSpeed;
-            navAgent.SetDestination(player.position);
-            lastKnownPlayerPosition = player.position;
-            boredomTimer = 0f;
-            
-            // Clear hiding spot if too close
-            if (currentHidingSpot != null)
-            {
-                currentHidingSpot = null;
-            }
-        }
-        // Medium range - walk/run based on boredom (4-5 units)
-        else if (distanceToPlayer <= 5f)
-        {
-            navAgent.speed = walkSpeed;
-            navAgent.SetDestination(player.position);
-            lastKnownPlayerPosition = player.position;
-            boredomTimer = 0f;
-            
-            // Clear hiding spot if too close
-            if (currentHidingSpot != null)
-            {
-                currentHidingSpot = null;
-            }
-        }
-        // Medium-far range - search behavior with hiding spot option (5-20 units)
-        else if (distanceToPlayer <= 20f)
-        {
-            // If we don't have a hiding spot and can see player, try to find one
-            if (currentHidingSpot == null && CanSeePlayer())
-            {
-                HidingSpot closest = HidingSpot.GetClosest(player.position, 5f, true);
-                if (closest != null && closest.distanceToJimmy <= 5f)
-                {
-                    // Found a good hiding spot, transition to Hiding state
-                    currentHidingSpot = closest;
-                    currentState = AIState.Hiding;
-                    return;
-                }
-            }
-            
-            // No hiding spot found or not visible, continue normal chase
-            navAgent.speed = walkSpeed;
-            navAgent.SetDestination(player.position);
-            lastKnownPlayerPosition = player.position;
-            boredomTimer += Time.deltaTime;
-            
-            // If bored and player still far, speed up
-            if (boredomTimer >= 15f && distanceToPlayer <= 20f)
-            {
-                navAgent.speed = runSpeed;
-            }
-        }
-        // Far range - run to last known position (20+ units)
-        else
-        {
-            navAgent.speed = runSpeed;
-            navAgent.SetDestination(player.position);
-            lastKnownPlayerPosition = player.position;
-            boredomTimer = 0f;
-            
-            // Clear hiding spot if too far
-            if (currentHidingSpot != null)
-            {
-                currentHidingSpot = null;
-            }
-        }
-    }
-    
-    void Investigate()
-    {
-        navAgent.speed = investigateSpeed;
-        
-        if (!navAgent.pathPending && navAgent.remainingDistance <= navAgent.stoppingDistance)
-        {
-            investigationTimer -= Time.deltaTime;
-            
-            if (investigationTimer <= 0)
-            {
-                currentState = AIState.Patrolling;
-                GoToNextPatrolPoint();
-            }
-        }
-    }
-    
-    void SearchForPlayer()
-    {
-        navAgent.speed = investigateSpeed;
-        
-        if (!navAgent.pathPending && navAgent.remainingDistance <= navAgent.stoppingDistance)
-        {
-            investigationTimer -= Time.deltaTime;
-            
-            if (investigationTimer <= 0)
-            {
-                currentState = AIState.Patrolling;
-                GoToNextPatrolPoint();
-            }
-        }
-        else if (investigationTimer > 0)
-        {
-            // Move to last known position
-            navAgent.SetDestination(lastKnownPlayerPosition);
-        }
-    }
-    
-    void Distracted()
-    {
-        navAgent.speed = runSpeed;
-        
-        // Move to last known player position
-        if (Vector3.Distance(transform.position, lastKnownPlayerPosition) > 4f || 
-            (goToLastSeen && Vector3.Distance(transform.position, lastKnownPlayerPosition) > 1f))
-        {
-            if (navAgent.destination != lastKnownPlayerPosition)
-            {
-                navAgent.SetDestination(lastKnownPlayerPosition);
-            }
-        }
-        else
-        {
-            // Reached last known position, wait and look around
-            investigationTimer += Time.deltaTime;
-            
-            // Wait at the position for a while before returning to patrol
-            if (investigationTimer >= investigationTime * (goToLastSeen ? 3f : 1f))
-            {
-                currentState = AIState.Patrolling;
-                goToLastSeen = false;
-                investigationTimer = 0f;
-            }
-        }
-        
-        boredomTimer = 0f;
-    }
-    
-    void HideAndPeek()
-    {
-        if (currentHidingSpot == null || player == null)
-        {
-            // No hiding spot, return to chase
-            isPlayingHidingAnimation = false;
-            currentState = AIState.Chasing;
-            return;
-        }
-        
-        float distanceToPlayer = Vector3.Distance(transform.position, player.position);
-        float distanceToSpot = Vector3.Distance(transform.position, currentHidingSpot.transform.position);
-        
-        // Check if we should abandon the hiding spot
-        if (distanceToPlayer < 5f)
-        {
-            // Player too close, chase them directly
-            StopHidingAnimation();
-            currentHidingSpot = null;
-            currentState = AIState.Chasing;
-            return;
-        }
-        
-        if (distanceToPlayer > 25f)
-        {
-            // Player too far, abandon hiding spot
-            StopHidingAnimation();
-            currentHidingSpot = null;
-            currentState = AIState.Chasing;
-            return;
-        }
-        
-        // Check if player is hiding
-        if (playerController != null && playerController.IsHiding())
-        {
-            // Player is hiding, abandon hiding spot and search
-            StopHidingAnimation();
-            currentHidingSpot = null;
-            currentState = AIState.Searching;
-            investigationTimer = investigationTime;
-            return;
-        }
-        
-        // Move to hiding spot if not there yet
-        if (distanceToSpot > 1f)
-        {
-            navAgent.speed = runSpeed;
-            navAgent.SetDestination(currentHidingSpot.transform.position);
-            boredomTimer = 0f;
-            isPlayingHidingAnimation = false;
-        }
-        else
-        {
-            // At hiding spot, stop and peek
-            navAgent.speed = 0f;
-            
-            // Play the hiding spot animation if available and not already playing
-            if (!isPlayingHidingAnimation)
-            {
-                PlayHidingSpotAnimation();
-                isPlayingHidingAnimation = true;
-            }
-            
-            // Look towards the player
-            Vector3 directionToPlayer = player.position - transform.position;
-            directionToPlayer.y = 0; // Keep rotation on horizontal plane
-            if (directionToPlayer.sqrMagnitude > 0.01f)
-            {
-                Quaternion targetRotation = Quaternion.LookRotation(directionToPlayer);
-                transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * 5f);
-            }
-            
-            // Lerp position to exact hiding spot position for peeking
-            transform.position = Vector3.Lerp(transform.position, currentHidingSpot.transform.position, Time.deltaTime * 5f);
-            
-            // Increment boredom timer while hiding
-            boredomTimer += Time.deltaTime;
-            
-            // After watching for a while, decide what to do
-            if (boredomTimer >= 10f)
-            {
-                // Been here too long, chase player directly
-                StopHidingAnimation();
-                currentHidingSpot = null;
-                currentState = AIState.Chasing;
-                boredomTimer = 0f;
-            }
-            else if (!CanSeePlayer())
-            {
-                // Lost sight of player, leave hiding spot
-                StopHidingAnimation();
-                currentHidingSpot = null;
-                currentState = AIState.Distracted;
-                goToLastSeen = true;
-            }
-        }
-    }
-    
-    /// <summary>
-    /// Play the animation assigned to the current hiding spot
-    /// </summary>
-    void PlayHidingSpotAnimation()
-    {
-        if (currentHidingSpot == null)
-            return;
-        
-        // Try to play animation with the legacy Animation component
-        if (animationComponent != null && currentHidingSpot.peekAnimation != null)
-        {
-            animationComponent.clip = currentHidingSpot.peekAnimation;
-            animationComponent.Play();
-            Debug.Log($"Playing hiding spot animation: {currentHidingSpot.peekAnimation.name}");
-        }
-        // Try to play animation with the Animator component (Mecanim)
-        else if (animatorComponent != null && !string.IsNullOrEmpty(currentHidingSpot.animationName))
-        {
-            // Try as trigger first
-            animatorComponent.SetTrigger(currentHidingSpot.animationName);
-            Debug.Log($"Playing hiding spot animation trigger: {currentHidingSpot.animationName}");
-            
-            // Also try to play directly if it's a state name
-            animatorComponent.Play(currentHidingSpot.animationName);
-        }
-    }
-    
-    /// <summary>
-    /// Stop the current hiding spot animation
-    /// </summary>
-    void StopHidingAnimation()
-    {
-        isPlayingHidingAnimation = false;
-        
-        // Stop legacy animation if playing
-        if (animationComponent != null && animationComponent.isPlaying)
-        {
-            animationComponent.Stop();
-        }
-        
-        // Note: Animator component transitions are handled by the animator controller
-        // so we don't need to explicitly stop them here
-    }
-    
-    public void HearNoise(Vector3 noisePosition)
-    {
-        // Add to hot zones for dynamic patrolling
-        UpdateHotZone(noisePosition);
-        
-        // If not chasing, investigate the noise
-        if (currentState != AIState.Chasing)
-        {
-            currentState = AIState.Distracted;
-            lastKnownPlayerPosition = noisePosition;
-            investigationTimer = 0f;
-            navAgent.SetDestination(noisePosition);
-            Debug.Log("Jimmy heard a noise!");
-        }
-    }
-    
-    public void NotifyDoorOpened(Vector3 doorPosition)
-    {
-        // Add to hot zones
-        UpdateHotZone(doorPosition);
-        
-        // Investigate door opening
-        if (currentState == AIState.Patrolling)
-        {
-            currentState = AIState.Distracted;
-            lastKnownPlayerPosition = doorPosition;
-            investigationTimer = 0f;
-            navAgent.SetDestination(doorPosition);
-            Debug.Log("Jimmy noticed a door opened!");
-        }
-    }
-    
-    void UpdateHotZone(Vector3 position)
-    {
-        // Add new hot zone
-        hotZones.Add(position);
-        
-        // Limit hot zones to prevent memory issues
-        if (hotZones.Count > 10)
-        {
-            hotZones.RemoveAt(0);
-        }
-    }
-    
-    void OnTriggerEnter(Collider other)
-    {
-        // Check if caught player
-        if (other.CompareTag("Player") && playerController != null && !playerController.IsHiding())
-        {
-            GameManager.Instance?.GameOver();
-            Debug.Log("Jimmy caught the player!");
-        }
-    }
-    
-    // Debug visualization
-    void OnDrawGizmosSelected()
-    {
-        // Draw detection range
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, detectionRange);
-        
-        // Draw field of view
-        Vector3 fovLine1 = Quaternion.AngleAxis(fieldOfView / 2f, Vector3.up) * transform.forward * detectionRange;
-        Vector3 fovLine2 = Quaternion.AngleAxis(-fieldOfView / 2f, Vector3.up) * transform.forward * detectionRange;
-        
-        Gizmos.color = Color.red;
-        Gizmos.DrawLine(transform.position, transform.position + fovLine1);
-        Gizmos.DrawLine(transform.position, transform.position + fovLine2);
-        
-        // Draw hot zones
-        Gizmos.color = Color.cyan;
-        foreach (Vector3 hotZone in hotZones)
-        {
-            Gizmos.DrawWireSphere(hotZone, hotZoneRadius);
-        }
-    }
+	public enum State
+	{
+		Patrol = 0,
+		Distracted = 1,
+		Chase = 2,
+		DisableElectricity = 3,
+		HideKey = 4,
+		Murder = 5
+	}
+
+	public static YandereScript instance;
+
+	public bool IsStatic;
+
+	[Header("Animation Settings")]
+	public YandereSFXSpawner SFXSpawner;
+
+	public FLookAnimator LookAt;
+
+	public SkinnedMeshRenderer MyRenderer;
+
+	public SkinnedMeshRenderer KunRenderer;
+
+	public Animation MyAnimation;
+
+	public Transform RightShoulder;
+
+	public GameObject Knife;
+
+	public string YandereAnim = "f02_yanderePose_00";
+
+	public string HoldKnifeAnim = "f02_holdKnife_00";
+
+	public string IdleAnim = "f02_idle_00";
+
+	public string WalkAnim = "f02_walk_00";
+
+	public string RunAnim = "f02_sprint_00";
+
+	public string SpyAnim = "f02_spying_00";
+
+	public string PeekAnim = "f02_cornerPeek_00";
+
+	[Header("Pathfinding Settings")]
+	public NavMeshAgent Pathfinding;
+
+	public State CurrentState;
+
+	public float LerpingSpeed = 10f;
+
+	public float WalkSpeed = 1f;
+
+	public float RunSpeed = 4f;
+
+	[Space(20f)]
+	public int PatrolPhase;
+
+	public Transform[] PatrolSpots;
+
+	public float lastSeenTimer;
+
+	[Space(20f)]
+	public HidingSpot CurrentHidingSpot;
+
+	public PowerControl PowerController;
+
+	public Transform PowerControlSpot;
+
+	[Space(20f)]
+	public TMP_Text CurrentKeyLabel;
+
+	public Vector3 KeyHidingSpot;
+
+	[Header("Witness Properties")]
+	public Transform Eyes;
+
+	public LayerMask TargetLayers;
+
+	public bool canSee = true;
+
+	public float VisionDistance = 20f;
+
+	public float FOV = 90f;
+
+	[Header("Other Properties")]
+	public AudioSource HeartbeatSource;
+
+	public AudioSource CreepySFXSource;
+
+	public Texture2D ChanUniformWNoiseLessShoes;
+
+	public Texture2D KunUniformWNoiseLessShoes;
+
+	public NotificationShower StolenShower;
+
+	public NotificationShower KnifeShower;
+
+	[Header("Caught Properties")]
+	public GameObject GameOverCamera;
+
+	public RawImage GameOverCameraSprite;
+
+	public RawImage FadeSprite;
+
+	public TMP_Text GameOverLabel;
+
+	public TMP_Text RestartLabel;
+
+	public TMP_Text TitleScreen;
+
+	[Header("Runtime Properties")]
+	public bool canMove;
+
+	public bool isPlayingOverlayAnimations;
+
+	public bool GoToLastSeen;
+
+	public bool GoToNewDoor;
+
+	public bool HasPlayedSFX;
+
+	public bool isAggressive;
+
+	public Collectable currentKey;
+
+	public Zone CurrentZone;
+
+	public float boredomTimer;
+
+	[Header("Knife Properties")]
+	public GameObject KnifePrefab;
+
+	public Transform[] KnifeSpawnSpots;
+
+	private float KnifeTimer;
+
+	private void OnEnable()
+	{
+		instance = this;
+	}
+
+	private void OnDisable()
+	{
+		instance = null;
+	}
+
+	private void Start()
+	{
+		if (!IsStatic)
+		{
+			EnableOverlayAnimation(flag: true);
+			if (GameSettings.HardMode)
+			{
+				RunSpeed = 4.85f;
+			}
+			if (GameSettings.KunMode)
+			{
+				MyRenderer = KunRenderer;
+			}
+		}
+	}
+
+	private void EnableOverlayAnimation(bool flag)
+	{
+		if (flag)
+		{
+			MyAnimation[YandereAnim].layer = 2;
+			MyAnimation.Play(YandereAnim);
+			MyAnimation[YandereAnim].weight = 1f;
+			MyAnimation[HoldKnifeAnim].layer = 3;
+			MyAnimation[HoldKnifeAnim].AddMixingTransform(RightShoulder);
+			MyAnimation.Play(HoldKnifeAnim);
+			Knife.SetActive(value: true);
+			isPlayingOverlayAnimations = true;
+		}
+		else
+		{
+			MyAnimation.Stop(YandereAnim);
+			MyAnimation[YandereAnim].weight = 0f;
+			MyAnimation[HoldKnifeAnim].RemoveMixingTransform(RightShoulder);
+			MyAnimation.Stop(HoldKnifeAnim);
+			Knife.SetActive(value: false);
+			isPlayingOverlayAnimations = false;
+		}
+	}
+
+	public void TurnAggressive()
+	{
+		isAggressive = true;
+		if (GameSettings.KunMode)
+		{
+			MyRenderer.materials[0].SetTexture("_MainTex", KunUniformWNoiseLessShoes);
+			return;
+		}
+		MyRenderer.materials[0].SetTexture("_MainTex", ChanUniformWNoiseLessShoes);
+		MyRenderer.materials[1].SetTexture("_MainTex", ChanUniformWNoiseLessShoes);
+	}
+
+	public bool InSight(Vector3 point)
+	{
+		Vector3 to = point - Eyes.position;
+		return Vector3.Angle(Eyes.forward, to) <= FOV;
+	}
+
+	public bool CanSee(GameObject obj, Vector3 targetPoint, bool debug = false)
+	{
+		if (canSee)
+		{
+			Debug.DrawLine(Eyes.position, targetPoint, Color.green);
+			Vector3 position = Eyes.position;
+			Vector3 vector = targetPoint - position;
+			float num = Mathf.Pow(VisionDistance, 2f);
+			bool num2 = InSight(targetPoint);
+			bool flag = vector.sqrMagnitude <= num;
+			if (num2 && flag && Physics.Linecast(position, targetPoint, out var hitInfo, TargetLayers))
+			{
+				if (debug)
+				{
+					Debug.Log(hitInfo.collider.gameObject.name);
+				}
+				if (hitInfo.collider.gameObject == obj)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	public bool CanSee(GameObject obj, Vector3 targetPoint, LayerMask targetLayers, bool debug = false)
+	{
+		if (canSee)
+		{
+			Debug.DrawLine(Eyes.position, targetPoint, Color.green);
+			Vector3 position = Eyes.position;
+			Vector3 vector = targetPoint - position;
+			float num = Mathf.Pow(VisionDistance, 2f);
+			bool num2 = InSight(targetPoint);
+			bool flag = vector.sqrMagnitude <= num;
+			if (num2 && flag && Physics.Linecast(position, targetPoint, out var hitInfo, targetLayers))
+			{
+				if (debug)
+				{
+					Debug.Log(hitInfo.collider.gameObject.name);
+				}
+				if (hitInfo.collider.gameObject == obj)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private void Update()
+	{
+		if (!IsStatic)
+		{
+			UpdateRoutine();
+		}
+	}
+
+	private void UpdateRoutine()
+	{
+		Pathfinding.isStopped = !canMove;
+		if (!Pathfinding.isStopped)
+		{
+			base.transform.rotation = Quaternion.Lerp(base.transform.rotation, Quaternion.Euler(0f, Quaternion.LookRotation(Pathfinding.velocity.normalized).eulerAngles.y, 0f), 0.1f);
+		}
+		switch (CurrentState)
+		{
+		case State.Patrol:
+			Patrol();
+			break;
+		case State.Distracted:
+			Distracted();
+			break;
+		case State.Chase:
+			Chase();
+			break;
+		case State.DisableElectricity:
+			DisableElectricity();
+			break;
+		case State.HideKey:
+			HideKey();
+			break;
+		case State.Murder:
+			Murder();
+			break;
+		}
+		if (Vector3.Distance(PlayerController.instance.transform.position, base.transform.position) < 0.2f || (Vector3.Distance(PlayerController.instance.transform.position, base.transform.position) < 0.75f && CanSee(PlayerController.instance.MainCamera.gameObject, PlayerController.instance.MainCamera.transform.position)))
+		{
+			PlayerController.instance.LockCamera = true;
+			PlayerController.instance.CanMove = false;
+			canMove = false;
+			CurrentState = State.Murder;
+		}
+		MyAnimation[WalkAnim].speed = WalkSpeed;
+		if (CurrentState == State.Murder || CurrentState == State.HideKey)
+		{
+			return;
+		}
+		if (CanSee(PlayerController.instance.MainCamera.gameObject, PlayerController.instance.MainCamera.transform.position) || (Mathf.Abs(PlayerController.instance.MyController.velocity.z) > 1f && !PlayerController.instance.isCrouching && Vector3.Distance(base.transform.position, PlayerController.instance.transform.position) < 5f) || ((isAggressive || GameSettings.HardMode) && Mathf.Abs(PlayerController.instance.MyController.velocity.z) > 1f && !PlayerController.instance.isCrouching && Vector3.Distance(base.transform.position, PlayerController.instance.transform.position) < 10f) || (Vector3.Distance(base.transform.position, PlayerController.instance.transform.position) < 3f && Mathf.Abs(PlayerController.instance.MyController.velocity.z) >= 1f && !PlayerController.instance.isCrouching) || ((isAggressive || GameSettings.HardMode) && Vector3.Distance(base.transform.position, PlayerController.instance.transform.position) < 5f && Mathf.Abs(PlayerController.instance.MyController.velocity.z) >= 1f && !PlayerController.instance.isCrouching))
+		{
+			if (CurrentState != State.Chase && CurrentState != State.HideKey)
+			{
+				if (PlayerController.instance.CurrentZone.MyType == ZoneType.Classroom)
+				{
+					PlayerController.instance.CurrentZone.SeenTimes++;
+					if (TrapManager.instance != null)
+					{
+						TrapManager.instance.SortSpottedAreas();
+					}
+				}
+				CurrentState = State.Chase;
+			}
+			else
+			{
+				PlayerController.instance.LastRunPosition = PlayerController.instance.transform.position;
+			}
+		}
+		else if (CurrentState != State.HideKey && CurrentHidingSpot == null)
+		{
+			if (CurrentState == State.Chase)
+			{
+				CurrentState = State.Distracted;
+				GoToLastSeen = true;
+			}
+			if (Mathf.Abs(PlayerController.instance.MyController.velocity.z) > 1f && !PlayerController.instance.isCrouching && CurrentState != State.Distracted)
+			{
+				CurrentState = State.Distracted;
+			}
+		}
+	}
+
+	private void HideKey()
+	{
+		if (WalkSpeed != 1.45f)
+		{
+			WalkSpeed = 1.45f;
+		}
+		else if (Pathfinding.speed != RunSpeed)
+		{
+			Pathfinding.speed = RunSpeed;
+		}
+		if (KeyHidingSpot == Vector3.zero)
+		{
+			KeyHidingSpot = ZoneManager.instance.GetAccessableHidingSpot(currentKey);
+		}
+		if (!isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: true);
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		KnifeTimer = 0f;
+		boredomTimer = 0f;
+		if (Vector3.Distance(base.transform.position, KeyHidingSpot) > 1f)
+		{
+			if (Pathfinding.destination != KeyHidingSpot)
+			{
+				Pathfinding.SetDestination(KeyHidingSpot);
+			}
+			if (Pathfinding.velocity == Vector3.zero)
+			{
+				Pathfinding.enabled = false;
+				Pathfinding.enabled = true;
+			}
+			else if (!MyAnimation.IsPlaying(RunAnim))
+			{
+				MyAnimation.CrossFade(RunAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+		}
+		else
+		{
+			currentKey.gameObject.SetActive(value: true);
+			KeyHidingSpot = Vector3.zero;
+			if (isAggressive || GameSettings.HardMode)
+			{
+				PlayerController.instance.LastRunPosition = PlayerController.instance.transform.position;
+			}
+			CurrentState = ((isAggressive || GameSettings.HardMode) ? State.Distracted : State.Patrol);
+		}
+	}
+
+	private void DisableElectricity()
+	{
+		if (WalkSpeed != 1.45f)
+		{
+			WalkSpeed = 1.45f;
+		}
+		if (Pathfinding.speed != WalkSpeed && !isAggressive && !GameSettings.HardMode)
+		{
+			Pathfinding.speed = WalkSpeed;
+		}
+		else if (Pathfinding.speed != RunSpeed && (isAggressive || GameSettings.HardMode))
+		{
+			Pathfinding.speed = RunSpeed;
+		}
+		if (!isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: true);
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		KnifeTimer = 0f;
+		boredomTimer = 0f;
+		if (Vector3.Distance(base.transform.position, PowerControlSpot.position) > 1f)
+		{
+			if (Pathfinding.destination != PowerControlSpot.position)
+			{
+				Pathfinding.SetDestination(PowerControlSpot.position);
+			}
+			if (!MyAnimation.IsPlaying(WalkAnim) && !isAggressive && !GameSettings.HardMode)
+			{
+				MyAnimation.CrossFade(WalkAnim);
+			}
+			else if (!MyAnimation.IsPlaying(RunAnim) && (isAggressive || GameSettings.HardMode))
+			{
+				MyAnimation.CrossFade(RunAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+			return;
+		}
+		if (!MyAnimation.IsPlaying(IdleAnim))
+		{
+			MyAnimation[IdleAnim].time = 0f;
+			MyAnimation.CrossFade(IdleAnim);
+			StartCoroutine(PowerController.Switch(PowerOn: false));
+		}
+		if (canMove)
+		{
+			canMove = false;
+		}
+		if (MyAnimation[IdleAnim].time >= MyAnimation[IdleAnim].length)
+		{
+			if (isAggressive || GameSettings.HardMode)
+			{
+				PlayerController.instance.LastRunPosition = PlayerController.instance.transform.position;
+			}
+			CurrentState = ((isAggressive || GameSettings.HardMode) ? State.Distracted : State.Patrol);
+		}
+	}
+
+	private void Murder()
+	{
+		PlayerController.instance.transform.LookAt(base.transform.position);
+		base.transform.LookAt(PlayerController.instance.transform.position);
+		base.transform.position = PlayerController.instance.transform.position + -base.transform.forward * 1.1f;
+		if (LookAt.enabled)
+		{
+			LookAt.enabled = false;
+		}
+		if (isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: false);
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		if (!GameOverCamera.activeInHierarchy)
+		{
+			GameOverCamera.SetActive(value: true);
+		}
+		GameOverCameraSprite.color = new Color(1f, 1f, 1f, Mathf.MoveTowards(GameOverCameraSprite.color.a, 1f, Time.deltaTime * 5f));
+		Knife.SetActive(value: true);
+		PlayerController.instance.MyAnimation.CrossFade("snapDie_00");
+		MyAnimation.CrossFade("f02_snapKill_00");
+		SFXSpawner.Murder();
+		if (PlayerController.instance.MyAnimation["snapDie_00"].time >= 9.12f)
+		{
+			FadeSprite.color = new Color(0f, 0f, 0f, Mathf.MoveTowards(FadeSprite.color.a, 1f, Time.deltaTime * 1f));
+			if (PlayerController.instance.MyAnimation["snapDie_00"].time >= PlayerController.instance.MyAnimation["snapDie_00"].length)
+			{
+				SceneManager.LoadScene("SchoolScene");
+			}
+		}
+	}
+
+	private void Patrol()
+	{
+		if (Pathfinding.speed != WalkSpeed)
+		{
+			Pathfinding.speed = WalkSpeed;
+		}
+		if (WalkSpeed != 1.2f && !isAggressive && !GameSettings.HardMode)
+		{
+			WalkSpeed = 1.2f;
+		}
+		else if (WalkSpeed != 1.5f && (isAggressive || GameSettings.HardMode))
+		{
+			WalkSpeed = 1.5f;
+		}
+		if (!isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: true);
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		if (HasPlayedSFX)
+		{
+			HasPlayedSFX = false;
+		}
+		KnifeTimer = 0f;
+		boredomTimer = 0f;
+		lastSeenTimer += Time.deltaTime;
+		if (lastSeenTimer > 60f || ((isAggressive || GameSettings.HardMode) && lastSeenTimer > 30f))
+		{
+			PlayerController.instance.LastRunPosition = PlayerController.instance.transform.position;
+			CurrentState = State.Distracted;
+			lastSeenTimer = 0f;
+		}
+		else if (Vector3.Distance(base.transform.position, PatrolSpots[PatrolPhase].position) > 1f)
+		{
+			if (Pathfinding.destination != PatrolSpots[PatrolPhase].position)
+			{
+				Pathfinding.SetDestination(PatrolSpots[PatrolPhase].position);
+			}
+			if (!MyAnimation.IsPlaying(WalkAnim))
+			{
+				MyAnimation.CrossFade(WalkAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+		}
+		else
+		{
+			PatrolPhase++;
+			if (PatrolPhase >= PatrolSpots.Length)
+			{
+				PatrolPhase = 0;
+			}
+		}
+	}
+
+	private void Distracted()
+	{
+		if (WalkSpeed != 1.45f)
+		{
+			WalkSpeed = 1.45f;
+		}
+		if (Pathfinding.speed != RunSpeed)
+		{
+			Pathfinding.speed = RunSpeed;
+		}
+		if (!isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: true);
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		KnifeTimer = 0f;
+		if (Vector3.Distance(base.transform.position, PlayerController.instance.LastRunPosition) > 4f || (GoToLastSeen && Vector3.Distance(base.transform.position, PlayerController.instance.LastRunPosition) > 1f))
+		{
+			if (Pathfinding.destination != PlayerController.instance.LastRunPosition)
+			{
+				Pathfinding.SetDestination(PlayerController.instance.LastRunPosition);
+			}
+			if (!MyAnimation.IsPlaying(RunAnim))
+			{
+				MyAnimation.CrossFade(RunAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+			return;
+		}
+		if (!MyAnimation.IsPlaying(IdleAnim))
+		{
+			MyAnimation[IdleAnim].time = 0f;
+			MyAnimation.CrossFade(IdleAnim);
+		}
+		if (canMove)
+		{
+			canMove = false;
+		}
+		if (MyAnimation[IdleAnim].time >= MyAnimation[IdleAnim].length * (GoToNewDoor ? 3f : 1f))
+		{
+			CurrentState = (PowerController.isActive ? State.DisableElectricity : State.Patrol);
+			GoToLastSeen = false;
+			GoToNewDoor = false;
+		}
+		boredomTimer = 0f;
+	}
+
+	private void Chase()
+	{
+		float num = Vector3.Distance(base.transform.position, PlayerController.instance.transform.position);
+		if (num <= 4f || (boredomTimer >= 15f && num <= 20f))
+		{
+			if (Pathfinding.destination != PlayerController.instance.transform.position)
+			{
+				Pathfinding.SetDestination(PlayerController.instance.transform.position);
+			}
+			if (!MyAnimation.IsPlaying(RunAnim))
+			{
+				MyAnimation.CrossFade(RunAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+			if (!isPlayingOverlayAnimations)
+			{
+				EnableOverlayAnimation(flag: true);
+			}
+			if (CurrentHidingSpot != null)
+			{
+				CurrentHidingSpot = null;
+			}
+			if (Pathfinding.speed != RunSpeed)
+			{
+				Pathfinding.speed = RunSpeed;
+			}
+			if (!HeartbeatSource.isPlaying)
+			{
+				HeartbeatSource.Play();
+			}
+			HeartbeatSource.volume = Mathf.Abs(1f - num / 20f);
+			if (!PlayerController.instance.CanRun || MyRenderer.isVisible || !(num > 8f))
+			{
+				return;
+			}
+			KnifeTimer += Time.deltaTime;
+			if (KnifeTimer >= 8f)
+			{
+				KnifeShower.Show(4f);
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[0].position, KnifeSpawnSpots[0].rotation).GetComponent<KnifeScript>().delay = 0f;
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[1].position, KnifeSpawnSpots[1].rotation).GetComponent<KnifeScript>().delay = 0.1f;
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[2].position, KnifeSpawnSpots[2].rotation).GetComponent<KnifeScript>().delay = 0.2f;
+				if (!GameSettings.KunMode)
+				{
+					YandereSFXSpawner.instance.PlayDodgeClip();
+				}
+				KnifeTimer = 0f;
+			}
+			return;
+		}
+		if (num <= 5f)
+		{
+			if (Pathfinding.destination != PlayerController.instance.transform.position)
+			{
+				Pathfinding.SetDestination(PlayerController.instance.transform.position);
+			}
+			if (!MyAnimation.IsPlaying(WalkAnim) && !isAggressive && !GameSettings.HardMode)
+			{
+				MyAnimation.CrossFade(WalkAnim);
+			}
+			else if (!MyAnimation.IsPlaying(RunAnim) && (isAggressive || GameSettings.HardMode))
+			{
+				MyAnimation.CrossFade(RunAnim);
+			}
+			if (!canMove)
+			{
+				canMove = true;
+			}
+			if (!isPlayingOverlayAnimations)
+			{
+				EnableOverlayAnimation(flag: true);
+			}
+			if (CurrentHidingSpot != null)
+			{
+				CurrentHidingSpot = null;
+			}
+			if (WalkSpeed != 1.45f)
+			{
+				WalkSpeed = 1.45f;
+			}
+			if (Pathfinding.speed != WalkSpeed && !isAggressive && !GameSettings.HardMode)
+			{
+				Pathfinding.speed = WalkSpeed;
+			}
+			else if (Pathfinding.speed != RunSpeed && (isAggressive || GameSettings.HardMode))
+			{
+				Pathfinding.speed = RunSpeed;
+			}
+			if (!HeartbeatSource.isPlaying)
+			{
+				HeartbeatSource.Play();
+			}
+			HeartbeatSource.volume = Mathf.Abs(1f - num / 20f);
+			KnifeTimer = 0f;
+			return;
+		}
+		if (num <= 20f || CurrentHidingSpot != null)
+		{
+			if (MyRenderer.isVisible)
+			{
+				if (!HasPlayedSFX)
+				{
+					CreepySFXSource.Play();
+					HasPlayedSFX = true;
+				}
+				if (!CurrentHidingSpot)
+				{
+					HidingSpot closest = HidingSpot.GetClosest(PlayerController.instance.CurrentZone.MyType);
+					if (closest != null && closest.DistanceToAyano <= 5f && !PlayerController.instance.transform.IsBehind(closest.transform))
+					{
+						CurrentHidingSpot = closest;
+					}
+					else
+					{
+						CurrentHidingSpot = null;
+					}
+					if (Pathfinding.destination != PlayerController.instance.transform.position)
+					{
+						Pathfinding.SetDestination(PlayerController.instance.transform.position);
+					}
+					if (!MyAnimation.IsPlaying(WalkAnim) && !GameSettings.HardMode)
+					{
+						MyAnimation.CrossFade(WalkAnim);
+					}
+					else if (!MyAnimation.IsPlaying(RunAnim) && GameSettings.HardMode)
+					{
+						MyAnimation.CrossFade(RunAnim);
+					}
+					if (!canMove)
+					{
+						canMove = true;
+					}
+					if (!isPlayingOverlayAnimations)
+					{
+						EnableOverlayAnimation(flag: true);
+					}
+					if (WalkSpeed != 1.45f)
+					{
+						WalkSpeed = 1.45f;
+					}
+					if (Pathfinding.speed != WalkSpeed && !GameSettings.HardMode)
+					{
+						Pathfinding.speed = WalkSpeed;
+					}
+					else if (Pathfinding.speed != RunSpeed && GameSettings.HardMode)
+					{
+						Pathfinding.speed = RunSpeed;
+					}
+				}
+				else
+				{
+					if (Pathfinding.destination != CurrentHidingSpot.transform.position)
+					{
+						Pathfinding.SetDestination(CurrentHidingSpot.transform.position);
+					}
+					if (Vector3.Distance(base.transform.position, CurrentHidingSpot.transform.position) < 1f)
+					{
+						string animation = ((CurrentHidingSpot.MyType == ZoneType.Classroom) ? SpyAnim : (PeekAnim + (CurrentHidingSpot.Left ? "_L" : "_R")));
+						if (!MyAnimation.IsPlaying(animation))
+						{
+							MyAnimation.CrossFade(animation);
+						}
+						if (canMove)
+						{
+							canMove = false;
+						}
+						if (isPlayingOverlayAnimations)
+						{
+							EnableOverlayAnimation(flag: false);
+						}
+						base.transform.position = Vector3.Lerp(base.transform.position, CurrentHidingSpot.transform.position, Time.deltaTime * LerpingSpeed);
+						base.transform.eulerAngles = Vector3.Lerp(base.transform.eulerAngles, CurrentHidingSpot.transform.eulerAngles, Time.deltaTime * LerpingSpeed);
+						boredomTimer += Time.deltaTime;
+					}
+					else
+					{
+						if (!MyAnimation.IsPlaying(RunAnim))
+						{
+							MyAnimation.CrossFade(RunAnim);
+						}
+						if (!canMove)
+						{
+							canMove = true;
+						}
+						if (!isPlayingOverlayAnimations)
+						{
+							EnableOverlayAnimation(flag: true);
+						}
+						if (Pathfinding.speed != RunSpeed)
+						{
+							Pathfinding.speed = RunSpeed;
+						}
+					}
+					if (CurrentHidingSpot.MyType != PlayerController.instance.CurrentZone.MyType)
+					{
+						CurrentHidingSpot = null;
+					}
+					else if (CurrentHidingSpot.MyZone != PlayerController.instance.CurrentZone)
+					{
+						CurrentHidingSpot = null;
+					}
+					else if (Vector3.Distance(base.transform.position, PlayerController.instance.transform.position) >= 25f)
+					{
+						CurrentHidingSpot = null;
+					}
+					else if (PlayerController.instance.CurrentLocker != null && !CanSee(PlayerController.instance.MainCamera.gameObject, PlayerController.instance.MainCamera.transform.position))
+					{
+						CurrentHidingSpot = null;
+					}
+					else if (!PlayerController.instance.transform.IsBehind(CurrentHidingSpot.transform))
+					{
+						KnifeTimer = 0f;
+					}
+				}
+			}
+			else
+			{
+				if (Pathfinding.destination != PlayerController.instance.transform.position)
+				{
+					Pathfinding.SetDestination(PlayerController.instance.transform.position);
+				}
+				if (!MyAnimation.IsPlaying(WalkAnim) && !GameSettings.HardMode)
+				{
+					MyAnimation.CrossFade(WalkAnim);
+				}
+				else if (!MyAnimation.IsPlaying(RunAnim) && GameSettings.HardMode)
+				{
+					MyAnimation.CrossFade(RunAnim);
+				}
+				if (!canMove)
+				{
+					canMove = true;
+				}
+				if (!isPlayingOverlayAnimations)
+				{
+					EnableOverlayAnimation(flag: true);
+				}
+				if (CurrentHidingSpot != null)
+				{
+					CurrentHidingSpot = null;
+				}
+				if (Pathfinding.speed != WalkSpeed && !isAggressive && !GameSettings.HardMode)
+				{
+					Pathfinding.speed = WalkSpeed;
+				}
+				else if (Pathfinding.speed != RunSpeed && (isAggressive || GameSettings.HardMode))
+				{
+					Pathfinding.speed = RunSpeed;
+				}
+				if (PlayerController.instance.CanRun)
+				{
+					KnifeTimer += Time.deltaTime;
+					if (KnifeTimer >= 8f)
+					{
+						KnifeShower.Show(3f);
+						Object.Instantiate(KnifePrefab, KnifeSpawnSpots[0].position, KnifeSpawnSpots[0].rotation).GetComponent<KnifeScript>().delay = 0f;
+						Object.Instantiate(KnifePrefab, KnifeSpawnSpots[1].position, KnifeSpawnSpots[1].rotation).GetComponent<KnifeScript>().delay = 0.4f;
+						Object.Instantiate(KnifePrefab, KnifeSpawnSpots[2].position, KnifeSpawnSpots[2].rotation).GetComponent<KnifeScript>().delay = 0.8f;
+						if (!GameSettings.KunMode)
+						{
+							YandereSFXSpawner.instance.PlayDodgeClip();
+						}
+						KnifeTimer = 0f;
+					}
+				}
+				boredomTimer = 0f;
+			}
+			if (!HeartbeatSource.isPlaying && HasPlayedSFX)
+			{
+				HeartbeatSource.Play();
+			}
+			HeartbeatSource.volume = Mathf.Abs(1f - num / 20f);
+			return;
+		}
+		if (Pathfinding.destination != PlayerController.instance.transform.position)
+		{
+			Pathfinding.SetDestination(PlayerController.instance.transform.position);
+		}
+		if (!MyAnimation.IsPlaying(RunAnim))
+		{
+			MyAnimation.CrossFade(RunAnim);
+		}
+		if (!canMove)
+		{
+			canMove = true;
+		}
+		if (CurrentHidingSpot != null)
+		{
+			CurrentHidingSpot = null;
+		}
+		if (!isPlayingOverlayAnimations)
+		{
+			EnableOverlayAnimation(flag: true);
+		}
+		if (Pathfinding.speed != RunSpeed)
+		{
+			Pathfinding.speed = RunSpeed;
+		}
+		if (HeartbeatSource.isPlaying)
+		{
+			HeartbeatSource.Stop();
+		}
+		if (PlayerController.instance.CanRun)
+		{
+			KnifeTimer += Time.deltaTime;
+			if (KnifeTimer >= 10f)
+			{
+				KnifeShower.Show(4f);
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[0].position, KnifeSpawnSpots[0].rotation).GetComponent<KnifeScript>().delay = 0f;
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[1].position, KnifeSpawnSpots[1].rotation).GetComponent<KnifeScript>().delay = 0.1f;
+				Object.Instantiate(KnifePrefab, KnifeSpawnSpots[2].position, KnifeSpawnSpots[2].rotation).GetComponent<KnifeScript>().delay = 0.2f;
+				if (!GameSettings.KunMode)
+				{
+					YandereSFXSpawner.instance.PlayDodgeClip();
+				}
+				KnifeTimer = 0f;
+			}
+		}
+		boredomTimer = 0f;
+	}
 }
